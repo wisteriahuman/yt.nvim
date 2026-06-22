@@ -14,23 +14,11 @@ M.config = {
   -- tplay は YouTube URL だとブラウザCookie抽出で失敗するため、先に yt-dlp で
   -- 音声込みの単一ストリーム(直リンク)を解決して渡す。18/22 は muxed mp4 で軽い
   tplay_format = '18/22/best[acodec!=none][vcodec!=none]',
-  -- 診断用ログ。tplay の stderr とプラグインの動作を書き出す
-  log_file = '/tmp/yt-nvim.log',
 }
 
 M.state = { active = {} }
 
 local function notify(m, l) vim.notify('[yt] ' .. m, l or vim.log.levels.INFO) end
-
-local function log(...)
-  local path = M.config and M.config.log_file
-  if not path or path == '' then return end
-  local parts = {}
-  for _, v in ipairs({ ... }) do parts[#parts + 1] = type(v) == 'string' and v or vim.inspect(v) end
-  local line = ('[%s] %s\n'):format(os.date('%H:%M:%S'), table.concat(parts, ' '))
-  local fd = io.open(path, 'a')
-  if fd then fd:write(line); fd:close() end
-end
 
 local function fmt_dur(s)
   if not s then return '--:--' end
@@ -88,9 +76,7 @@ function M.play(url, title)
       cmd = { 'wezterm', 'cli', 'split-pane', '--right', '--percent', tostring(M.config.pane_percent), '--' }
     end
     vim.list_extend(cmd, inner)
-    log('spawn_term cmd:', table.concat(cmd, ' '))
     vim.system(cmd, { text = true }, vim.schedule_wrap(function(res)
-      log('wezterm exit=' .. tostring(res.code), 'stdout=' .. vim.trim(res.stdout or ''), 'stderr=' .. vim.trim(res.stderr or ''))
       if res.code ~= 0 then
         notify('wezterm失敗→通常ウィンドウで再生', vim.log.levels.WARN)
         table.insert(M.state.active, { kind = 'proc', handle = vim.system({ 'mpv', '--really-quiet', url }) })
@@ -105,14 +91,11 @@ function M.play(url, title)
     -- tplay は単一プロセスで映像+音声+同期を処理する(音ずれしにくい/kitty より軽い)。
     -- ただし YouTube URL 直渡しは Cookie 抽出で失敗するので、yt-dlp で直リンク解決してから渡す
     notify('▶ ' .. (title or url) .. '  (直リンク解決中…)')
-    log('--- play(tplay) ---', 'url=' .. url, 'fmt=' .. M.config.tplay_format)
     vim.system(
       { 'yt-dlp', '-f', M.config.tplay_format, '-g', '--no-warnings', url },
       { text = true },
       vim.schedule_wrap(function(res)
         local direct = (res.code == 0) and (res.stdout or ''):match('([^\r\n]+)') or nil
-        log('yt-dlp exit=' .. tostring(res.code), 'direct=' .. tostring(direct and direct:sub(1, 80)))
-        if (res.stderr or '') ~= '' then log('yt-dlp stderr:', vim.trim(res.stderr)) end
         if not direct then
           notify('直リンク解決失敗: ' .. vim.trim((res.stderr or 'unknown'):sub(1, 120)) .. ' →kitty で再生', vim.log.levels.WARN)
           local fb = { 'mpv' }
@@ -122,13 +105,10 @@ function M.play(url, title)
           spawn_term(fb)
           return
         end
-        -- tplay を sh でラップ: stderr をログに保存し、異常終了ならペインを開いたまま残す
-        local tlog = (M.config.log_file or '/tmp/yt-nvim.log') .. '.tplay'
-        local script = 'tplay ' .. table.concat(M.config.tplay_args, ' ') .. ' "$1" 2>' .. tlog
-          .. '; ec=$?; if [ "$ec" -ne 0 ]; then printf "\\n=== tplay exit=%s ===\\n" "$ec"; cat ' .. tlog
-          .. '; printf "\\n(enter で閉じる) "; read _; fi'
-        log('spawn tplay via sh, args=' .. table.concat(M.config.tplay_args, ' '), 'stderr→' .. tlog)
-        spawn_term({ 'sh', '-c', script, 'yt', vim.trim(direct) })
+        local inner = { 'tplay' }
+        vim.list_extend(inner, M.config.tplay_args)
+        table.insert(inner, vim.trim(direct))
+        spawn_term(inner)
       end)
     )
     return
