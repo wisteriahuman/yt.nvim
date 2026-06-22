@@ -11,6 +11,9 @@ M.config = {
   mpv_args = { '--really-quiet', '--hwdec=auto-safe' },
   -- vo='tplay' のとき使う引数。-x:再生終了で自動exit / -a:遅延時はコマ落としして同期維持
   tplay_args = { '-x', '--allow-frame-skip' },
+  -- tplay は YouTube URL だとブラウザCookie抽出で失敗するため、先に yt-dlp で
+  -- 音声込みの単一ストリーム(直リンク)を解決して渡す。18/22 は muxed mp4 で軽い
+  tplay_format = '18/22/best[acodec!=none][vcodec!=none]',
 }
 
 M.state = { active = {} }
@@ -64,40 +67,64 @@ function M.play(url, title)
     table.insert(M.state.active, { kind = 'proc', handle = vim.system(mpv) }); return
   end
 
-  -- ターミナル内描画(pane/tab)。vo に応じて中身のプレイヤーを切り替える
-  local inner
-  if M.config.vo == 'tplay' then
-    -- tplay は単一プロセスで映像+音声+同期を処理する(音ずれしにくい/kitty より軽い)
-    inner = { 'tplay' }
-    vim.list_extend(inner, M.config.tplay_args)
-    table.insert(inner, url)
-  else
-    inner = mpv -- mpv_args / volume は適用済み
-    if M.config.vo == 'tct' then
-      table.insert(inner, '--vo=tct')
+  -- ターミナル内描画(pane/tab)を wezterm のペイン/タブで起動する共通処理
+  local function spawn_term(inner)
+    local cmd
+    if layout == 'tab' then
+      cmd = { 'wezterm', 'cli', 'spawn', '--' }
     else
-      table.insert(inner, '--vo=kitty')
-      if M.config.kitty_use_shm then table.insert(inner, '--vo-kitty-use-shm=yes') end
+      cmd = { 'wezterm', 'cli', 'split-pane', '--right', '--percent', tostring(M.config.pane_percent), '--' }
     end
-    table.insert(inner, url)
+    vim.list_extend(cmd, inner)
+    vim.system(cmd, { text = true }, vim.schedule_wrap(function(res)
+      if res.code ~= 0 then
+        notify('wezterm失敗→通常ウィンドウで再生', vim.log.levels.WARN)
+        table.insert(M.state.active, { kind = 'proc', handle = vim.system({ 'mpv', '--really-quiet', url }) })
+        return
+      end
+      local id = (res.stdout or ''):match('%d+')
+      if id then table.insert(M.state.active, { kind = 'pane', id = id }) end
+    end))
   end
-  local cmd
-  if layout == 'tab' then
-    cmd = { 'wezterm', 'cli', 'spawn', '--' }
+
+  if M.config.vo == 'tplay' then
+    -- tplay は単一プロセスで映像+音声+同期を処理する(音ずれしにくい/kitty より軽い)。
+    -- ただし YouTube URL 直渡しは Cookie 抽出で失敗するので、yt-dlp で直リンク解決してから渡す
+    notify('▶ ' .. (title or url) .. '  (直リンク解決中…)')
+    vim.system(
+      { 'yt-dlp', '-f', M.config.tplay_format, '-g', '--no-warnings', url },
+      { text = true },
+      vim.schedule_wrap(function(res)
+        local direct = (res.code == 0) and (res.stdout or ''):match('([^\r\n]+)') or nil
+        if not direct then
+          notify('直リンク解決に失敗→kitty で再生', vim.log.levels.WARN)
+          local fb = { 'mpv' }
+          vim.list_extend(fb, M.config.mpv_args)
+          table.insert(fb, '--vo=kitty')
+          table.insert(fb, url)
+          spawn_term(fb)
+          return
+        end
+        local inner = { 'tplay' }
+        vim.list_extend(inner, M.config.tplay_args)
+        table.insert(inner, vim.trim(direct))
+        spawn_term(inner)
+      end)
+    )
+    return
+  end
+
+  -- mpv (kitty / tct)
+  local inner = mpv -- mpv_args / volume は適用済み
+  if M.config.vo == 'tct' then
+    table.insert(inner, '--vo=tct')
   else
-    cmd = { 'wezterm', 'cli', 'split-pane', '--right', '--percent', tostring(M.config.pane_percent), '--' }
+    table.insert(inner, '--vo=kitty')
+    if M.config.kitty_use_shm then table.insert(inner, '--vo-kitty-use-shm=yes') end
   end
-  vim.list_extend(cmd, inner)
+  table.insert(inner, url)
   notify('▶ ' .. (title or url))
-  vim.system(cmd, { text = true }, vim.schedule_wrap(function(res)
-    if res.code ~= 0 then
-      notify('wezterm失敗→通常ウィンドウで再生', vim.log.levels.WARN)
-      table.insert(M.state.active, { kind = 'proc', handle = vim.system({ 'mpv', '--really-quiet', url }) })
-      return
-    end
-    local id = (res.stdout or ''):match('%d+')
-    if id then table.insert(M.state.active, { kind = 'pane', id = id }) end
-  end))
+  spawn_term(inner)
 end
 
 function M.stop()
