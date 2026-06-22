@@ -3,12 +3,14 @@ local M = {}
 M.config = {
   search_count = 12,
   player = 'pane',  -- pane | tab | window | audio
-  vo = 'kitty',     -- kitty | tct
+  vo = 'kitty',     -- kitty | tct | tplay
   pane_percent = 42,
   replace = true,
   kitty_use_shm = true,
   volume = nil,
   mpv_args = { '--really-quiet', '--hwdec=auto-safe' },
+  -- vo='tplay' のとき使う引数。-x:再生終了で自動exit / -a:遅延時はコマ落としして同期維持
+  tplay_args = { '-x', '--allow-frame-skip' },
 }
 
 M.state = { active = {} }
@@ -24,7 +26,7 @@ local function fmt_dur(s)
 end
 
 local LAYOUTS = { pane = true, wezterm = true, tab = true, window = true, audio = true }
-local VOS = { kitty = true, tct = true }
+local VOS = { kitty = true, tct = true, tplay = true }
 local function apply_mode(token)
   if VOS[token] then M.config.vo = token; return true end
   if LAYOUTS[token] then M.config.player = (token == 'wezterm') and 'pane' or token; return true end
@@ -62,20 +64,30 @@ function M.play(url, title)
     table.insert(M.state.active, { kind = 'proc', handle = vim.system(mpv) }); return
   end
 
-  if M.config.vo == 'tct' then
-    table.insert(mpv, '--vo=tct')
+  -- ターミナル内描画(pane/tab)。vo に応じて中身のプレイヤーを切り替える
+  local inner
+  if M.config.vo == 'tplay' then
+    -- tplay は単一プロセスで映像+音声+同期を処理する(音ずれしにくい/kitty より軽い)
+    inner = { 'tplay' }
+    vim.list_extend(inner, M.config.tplay_args)
+    table.insert(inner, url)
   else
-    table.insert(mpv, '--vo=kitty')
-    if M.config.kitty_use_shm then table.insert(mpv, '--vo-kitty-use-shm=yes') end
+    inner = mpv -- mpv_args / volume は適用済み
+    if M.config.vo == 'tct' then
+      table.insert(inner, '--vo=tct')
+    else
+      table.insert(inner, '--vo=kitty')
+      if M.config.kitty_use_shm then table.insert(inner, '--vo-kitty-use-shm=yes') end
+    end
+    table.insert(inner, url)
   end
-  table.insert(mpv, url)
   local cmd
   if layout == 'tab' then
     cmd = { 'wezterm', 'cli', 'spawn', '--' }
   else
     cmd = { 'wezterm', 'cli', 'split-pane', '--right', '--percent', tostring(M.config.pane_percent), '--' }
   end
-  vim.list_extend(cmd, mpv)
+  vim.list_extend(cmd, inner)
   notify('▶ ' .. (title or url))
   vim.system(cmd, { text = true }, vim.schedule_wrap(function(res)
     if res.code ~= 0 then
@@ -170,7 +182,7 @@ function M.setup(opts)
     { nargs = '?', desc = 'YouTube検索→再生' })
   vim.api.nvim_create_user_command('YtStop', function() M.stop() end,
     { desc = 'YouTube再生を止める' })
-  local function modes() return { 'pane', 'tab', 'window', 'audio', 'kitty', 'tct' } end
+  local function modes() return { 'pane', 'tab', 'window', 'audio', 'kitty', 'tct', 'tplay' } end
   vim.api.nvim_create_user_command('YtSwitch', function(o) M.switch(o.args) end,
     { nargs = '?', desc = '直近を別モードで再生し直す', complete = modes })
   vim.api.nvim_create_user_command('YtPlayer', function(o)
